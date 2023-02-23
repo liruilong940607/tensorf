@@ -3,6 +3,7 @@ import json
 import os
 import random
 import sys
+import time
 
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
@@ -254,6 +255,7 @@ def reconstruction(args):
         miniters=args.progress_refresh_rate,
         file=sys.stdout,
     )
+    tic = time.time()
     for iteration in pbar:
 
         ray_idx = trainingSampler.nextids()
@@ -396,6 +398,8 @@ def reconstruction(args):
             optimizer = torch.optim.Adam(grad_vars, betas=(0.9, 0.99))
 
     tensorf.save(f"{logfolder}/{args.expname}.th")
+    elapsed_time = time.time() - tic
+    print(f"Total time {elapsed_time:.2f}s.")
 
     if args.render_train:
         os.makedirs(f"{logfolder}/imgs_train_all", exist_ok=True)
