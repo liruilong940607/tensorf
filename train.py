@@ -5,6 +5,7 @@ import random
 import sys
 import time
 
+import nerfacc
 from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
@@ -182,6 +183,12 @@ def reconstruction(args):
         tensorf = eval(args.model_name)(**kwargs)
         tensorf.load(ckpt)
     else:
+        occ_grid = None
+        if args.occ_grid_reso > 0:
+            occ_grid = nerfacc.OccupancyGrid(
+                roi_aabb=aabb.reshape(-1), resolution=args.occ_grid_reso
+            ).to(device)
+
         tensorf = eval(args.model_name)(
             aabb,
             reso_cur,
@@ -191,6 +198,7 @@ def reconstruction(args):
             app_dim=args.data_dim_color,
             near_far=near_far,
             shadingMode=args.shadingMode,
+            occGrid=occ_grid,
             alphaMask_thres=args.alpha_mask_thre,
             density_shift=args.density_shift,
             distance_scale=args.distance_scale,
@@ -201,6 +209,10 @@ def reconstruction(args):
             step_ratio=args.step_ratio,
             fea2denseAct=args.fea2denseAct,
         )
+
+    # Don't update aabb and invaabbSize for occ.
+    def occ_normalize_coord(xyz_sampled):
+        return (xyz_sampled - tensorf.aabb[0]) * tensorf.invaabbSize - 1
 
     grad_vars = tensorf.get_optparam_groups(args.lr_init, args.lr_basis)
     if args.lr_decay_iters > 0:
@@ -255,14 +267,43 @@ def reconstruction(args):
         miniters=args.progress_refresh_rate,
         file=sys.stdout,
     )
-    tic = time.time()
+    run_tic = time.time()
+    step_tic = time.time()
+    num_rays_per_sec = num_samples_per_sec = 0
     for iteration in pbar:
 
         ray_idx = trainingSampler.nextids()
         rays_train, rgb_train = allrays[ray_idx], allrgbs[ray_idx].to(device)
 
+        if tensorf.occGrid is not None:
+
+            def occ_eval_fn(x):
+                step_size = tensorf.stepSize
+
+                # compute occupancy
+                density = (
+                    tensorf.feature2density(
+                        tensorf.compute_densityfeature(occ_normalize_coord(x))[
+                            :, None
+                        ]
+                    )
+                    * tensorf.distance_scale
+                )
+                return density * step_size
+
+            tensorf.occGrid.every_n_step(
+                step=iteration, occ_eval_fn=occ_eval_fn
+            )
+
         # rgb_map, alphas_map, depth_map, weights, uncertainty
-        rgb_map, alphas_map, depth_map, weights, uncertainty = renderer(
+        (
+            rgb_map,
+            alphas_map,
+            depth_map,
+            weights,
+            uncertainty,
+            num_samples,
+        ) = renderer(
             rays_train,
             tensorf,
             chunk=args.batch_size,
@@ -272,6 +313,8 @@ def reconstruction(args):
             device=device,
             is_train=True,
         )
+        num_rays_per_sec += rays_train.shape[0]
+        num_samples_per_sec += num_samples
 
         loss = torch.mean((rgb_map - rgb_train) ** 2)
 
@@ -328,13 +371,21 @@ def reconstruction(args):
 
         # Print the current values of the losses.
         if iteration % args.progress_refresh_rate == 0:
+            step_toc = time.time()
+            delta_time = step_toc - step_tic
             pbar.set_description(
                 f"Iteration {iteration:05d}:"
                 + f" train_psnr = {float(np.mean(PSNRs)):.2f}"
                 + f" test_psnr = {float(np.mean(PSNRs_test)):.2f}"
                 + f" mse = {loss:.6f}"
+                + f" elapsed_time = {step_toc - run_tic:.2f}"
+                + f" num_rays_per_sec = {num_rays_per_sec/delta_time:.2e}"
+                + f" num_samples_per_sec = {num_samples_per_sec/delta_time:.2e}"
             )
             PSNRs = []
+            num_rays_per_sec = 0
+            num_samples_per_sec = 0
+            step_tic = time.time()
 
         if (
             iteration % args.vis_every == args.vis_every - 1
@@ -398,7 +449,7 @@ def reconstruction(args):
             optimizer = torch.optim.Adam(grad_vars, betas=(0.9, 0.99))
 
     tensorf.save(f"{logfolder}/{args.expname}.th")
-    elapsed_time = time.time() - tic
+    elapsed_time = time.time() - run_tic
     print(f"Total time {elapsed_time:.2f}s.")
 
     if args.render_train:

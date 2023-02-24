@@ -1,5 +1,6 @@
 import time
 
+import nerfacc
 import numpy as np
 import torch
 import torch.nn
@@ -191,9 +192,11 @@ class TensorBase(torch.nn.Module):
         app_dim=27,
         shadingMode="MLP_PE",
         alphaMask=None,
+        occGrid=None,
         near_far=[2.0, 6.0],
         density_shift=-10,
         alphaMask_thres=0.001,
+        occGrid_alpha_thres=0.0,
         distance_scale=25,
         rayMarch_weight_thres=0.0001,
         pos_pe=6,
@@ -210,10 +213,12 @@ class TensorBase(torch.nn.Module):
         self.app_dim = app_dim
         self.aabb = aabb
         self.alphaMask = alphaMask
+        self.occGrid = occGrid
         self.device = device
 
         self.density_shift = density_shift
         self.alphaMask_thres = alphaMask_thres
+        self.occGrid_alpha_thres = occGrid_alpha_thres
         self.distance_scale = distance_scale
         self.rayMarch_weight_thres = rayMarch_weight_thres
         self.fea2denseAct = fea2denseAct
@@ -370,7 +375,6 @@ class TensorBase(torch.nn.Module):
         rate_a = (self.aabb[1] - rays_o) / vec
         rate_b = (self.aabb[0] - rays_o) / vec
         t_min = torch.minimum(rate_a, rate_b).amax(-1).clamp(min=near, max=far)
-        __import__("ipdb").set_trace()
 
         rng = torch.arange(N_samples)[None].float()
         if is_train:
@@ -525,7 +529,7 @@ class TensorBase(torch.nn.Module):
 
         return alpha
 
-    def forward(
+    def _forward(
         self,
         rays_chunk,
         white_bg=True,
@@ -533,7 +537,6 @@ class TensorBase(torch.nn.Module):
         ndc_ray=False,
         N_samples=-1,
     ):
-
         # sample points
         viewdirs = rays_chunk[:, 3:6]
         if ndc_ray:
@@ -613,4 +616,98 @@ class TensorBase(torch.nn.Module):
             depth_map = torch.sum(weight * z_vals, -1)
             depth_map = depth_map + (1.0 - acc_map) * rays_chunk[..., -1]
 
-        return rgb_map, depth_map  # rgb, sigma, alpha, weight, bg_weight
+        num_valid_samples = app_mask.sum()
+        return (
+            rgb_map,
+            depth_map,
+            num_valid_samples,
+        )  # rgb, sigma, alpha, weight, bg_weight
+
+    def _forward_nerfacc(
+        self,
+        rays_chunk,
+        white_bg=True,
+        is_train=False,
+        ndc_ray=False,
+        N_samples=-1,
+    ):
+        assert not ndc_ray
+        origins = rays_chunk[:, :3]
+        viewdirs = rays_chunk[:, 3:6]
+        # TODO(Hang Gao @ 02/23): What does this distance_scale do? Without it
+        # the training step won't converge.
+
+        def sigma_fn(t_starts, t_ends, ray_indices):
+            t_origins = origins[ray_indices]
+            t_dirs = viewdirs[ray_indices]
+            positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+            if t_origins.shape[0] == 0:
+                return torch.zeros((0, 1), device=t_origins.device)
+            return (
+                self.feature2density(  # type: ignore
+                    self.compute_densityfeature(
+                        self.normalize_coord(positions)
+                    )
+                )[:, None]
+                * self.distance_scale
+            )
+
+        def rgb_sigma_fn(t_starts, t_ends, ray_indices):
+            t_origins = origins[ray_indices]
+            t_dirs = viewdirs[ray_indices]
+            if t_origins.shape[0] == 0:
+                return torch.zeros(
+                    (0, 3), device=t_origins.device
+                ), torch.zeros((0, 1), device=t_origins.device)
+            positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+            positions = self.normalize_coord(positions)
+            sigmas = (
+                self.feature2density(  # type: ignore
+                    self.compute_densityfeature(positions)
+                )[:, None]
+                * self.distance_scale
+            )
+            rgbs = self.renderModule(
+                positions, t_dirs, self.compute_appfeature(positions)
+            )
+            return rgbs, sigmas
+
+        ray_indices, t_starts, t_ends = nerfacc.ray_marching(
+            origins,
+            viewdirs,
+            scene_aabb=self.aabb.reshape(-1),
+            grid=self.occGrid,
+            sigma_fn=sigma_fn,
+            near_plane=self.near_far[0],
+            far_plane=self.near_far[1],
+            render_step_size=self.stepSize,
+            stratified=is_train,
+            alpha_thre=self.occGrid_alpha_thres,
+        )
+        rgb_map, _, depth_map = nerfacc.rendering(
+            t_starts,
+            t_ends,
+            ray_indices,
+            n_rays=origins.shape[0],
+            rgb_sigma_fn=rgb_sigma_fn,
+            render_bkgd=1 if white_bg else 0,
+        )
+
+        return rgb_map, depth_map, t_starts.shape[0]
+
+    def forward(
+        self,
+        rays_chunk,
+        white_bg=True,
+        is_train=False,
+        ndc_ray=False,
+        N_samples=-1,
+    ):
+        if self.occGrid is not None:
+            return self._forward_nerfacc(
+                rays_chunk, white_bg, is_train, ndc_ray, N_samples
+            )
+        else:
+            return self._forward(
+                rays_chunk, white_bg, is_train, ndc_ray, N_samples
+            )

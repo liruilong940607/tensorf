@@ -196,6 +196,7 @@ def config_parser(cmd=None):
     parser.add_argument("--N_voxel_final", type=int, default=300**3)
     parser.add_argument("--upsamp_list", type=int, action="append")
     parser.add_argument("--update_AlphaMask_list", type=int, action="append")
+    parser.add_argument("--occ_grid_reso", type=int, default=-1)
 
     parser.add_argument("--idx_view", type=int, default=0)
     # logging/saving options

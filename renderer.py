@@ -27,14 +27,21 @@ def OctreeRender_trilinear_fast(
     device="cuda",
 ):
 
-    rgbs, alphas, depth_maps, weights, uncertainties = [], [], [], [], []
+    rgbs, alphas, depth_maps, weights, uncertainties, num_samples = (
+        [],
+        [],
+        [],
+        [],
+        [],
+        [],
+    )
     N_rays_all = rays.shape[0]
     for chunk_idx in range(N_rays_all // chunk + int(N_rays_all % chunk > 0)):
         rays_chunk = rays[chunk_idx * chunk : (chunk_idx + 1) * chunk].to(
             device
         )
 
-        rgb_map, depth_map = tensorf(
+        rgb_map, depth_map, num_valid_samples = tensorf(
             rays_chunk,
             is_train=is_train,
             white_bg=white_bg,
@@ -44,8 +51,16 @@ def OctreeRender_trilinear_fast(
 
         rgbs.append(rgb_map)
         depth_maps.append(depth_map)
+        num_samples.append(float(num_valid_samples))
 
-    return torch.cat(rgbs), None, torch.cat(depth_maps), None, None
+    return (
+        torch.cat(rgbs),
+        None,
+        torch.cat(depth_maps),
+        None,
+        None,
+        sum(num_samples),
+    )
 
 
 @torch.no_grad()
@@ -60,7 +75,8 @@ def evaluation(
     N_samples=-1,
     white_bg=False,
     ndc_ray=False,
-    compute_extra_metrics=True,
+    #  compute_extra_metrics=True,
+    compute_extra_metrics=False,
     device="cuda",
 ):
     PSNRs, rgb_maps, depth_maps = [], [], []
@@ -85,7 +101,7 @@ def evaluation(
         W, H = test_dataset.img_wh
         rays = samples.view(-1, samples.shape[-1])
 
-        rgb_map, _, depth_map, _, _ = renderer(
+        rgb_map, _, depth_map, _, _, _ = renderer(
             rays,
             tensorf,
             chunk=4096,
@@ -101,7 +117,7 @@ def evaluation(
             depth_map.reshape(H, W).cpu(),
         )
 
-        depth_map, _ = visualize_depth_numpy(depth_map.numpy(), near_far)
+        #  depth_map, _ = visualize_depth_numpy(depth_map.numpy(), near_far)
         if len(test_dataset.all_rgbs):
             gt_rgb = test_dataset.all_rgbs[idxs[idx]].view(H, W, 3)
             loss = torch.mean((rgb_map - gt_rgb) ** 2)
@@ -122,21 +138,21 @@ def evaluation(
         rgb_map = (rgb_map.numpy() * 255).astype("uint8")
         # rgb_map = np.concatenate((rgb_map, depth_map), axis=1)
         rgb_maps.append(rgb_map)
-        depth_maps.append(depth_map)
-        if savePath is not None:
-            imageio.imwrite(f"{savePath}/{prtx}{idx:03d}.png", rgb_map)
-            rgb_map = np.concatenate((rgb_map, depth_map), axis=1)
-            imageio.imwrite(f"{savePath}/rgbd/{prtx}{idx:03d}.png", rgb_map)
+        #  depth_maps.append(depth_map)
+        #  if savePath is not None:
+        #      imageio.imwrite(f"{savePath}/{prtx}{idx:03d}.png", rgb_map)
+        #      rgb_map = np.concatenate((rgb_map, depth_map), axis=1)
+        #      imageio.imwrite(f"{savePath}/rgbd/{prtx}{idx:03d}.png", rgb_map)
 
-    imageio.mimwrite(
-        f"{savePath}/{prtx}video.mp4", np.stack(rgb_maps), fps=30, quality=10
-    )
-    imageio.mimwrite(
-        f"{savePath}/{prtx}depthvideo.mp4",
-        np.stack(depth_maps),
-        fps=30,
-        quality=10,
-    )
+    #  imageio.mimwrite(
+    #      f"{savePath}/{prtx}video.mp4", np.stack(rgb_maps), fps=30, quality=10
+    #  )
+    #  imageio.mimwrite(
+    #      f"{savePath}/{prtx}depthvideo.mp4",
+    #      np.stack(depth_maps),
+    #      fps=30,
+    #      quality=10,
+    #  )
 
     if PSNRs:
         psnr = np.mean(np.asarray(PSNRs))
@@ -194,7 +210,7 @@ def evaluation_path(
             )
         rays = torch.cat([rays_o, rays_d], 1)  # (h*w, 6)
 
-        rgb_map, _, depth_map, _, _ = renderer(
+        rgb_map, _, depth_map, _, _, _ = renderer(
             rays,
             tensorf,
             chunk=8192,
