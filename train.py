@@ -1,3 +1,6 @@
+#  import torch
+
+#  torch.autograd.set_detect_anomaly(True)
 import datetime
 import json
 import os
@@ -10,6 +13,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm.auto import tqdm
 
 from dataLoader import dataset_dict
+from models.prop_utils import compute_prop_loss, get_proposal_requires_grad_fn
 from opt import config_parser
 from renderer import *
 from utils import *
@@ -208,6 +212,10 @@ def reconstruction(args):
             featureC=args.featureC,
             step_ratio=args.step_ratio,
             fea2denseAct=args.fea2denseAct,
+            gridSize_factor_per_prop=args.gridSize_factor_per_prop,
+            density_factor_per_prop=args.density_factor_per_prop,
+            num_samples_per_prop=args.num_samples_per_prop,
+            num_samples=args.num_samples,
         )
 
     # Don't update aabb and invaabbSize for occ.
@@ -261,6 +269,7 @@ def reconstruction(args):
     print(
         f"initial TV_weight density: {TV_weight_density} appearance: {TV_weight_app}"
     )
+    proposal_requires_grad_fn = get_proposal_requires_grad_fn()
 
     pbar = tqdm(
         range(args.n_iters),
@@ -303,6 +312,8 @@ def reconstruction(args):
             weights,
             uncertainty,
             num_samples,
+            weights_per_level,
+            s_vals_per_level,
         ) = renderer(
             rays_train,
             tensorf,
@@ -312,6 +323,7 @@ def reconstruction(args):
             ndc_ray=ndc_ray,
             device=device,
             is_train=True,
+            prop_requires_grad=proposal_requires_grad_fn(iteration),
         )
         num_rays_per_sec += rays_train.shape[0]
         num_samples_per_sec += num_samples
@@ -352,6 +364,13 @@ def reconstruction(args):
                 "train/reg_tv_app",
                 loss_tv.detach().item(),
                 global_step=iteration,
+            )
+
+        if tensorf.use_prop:
+            loss_prop = compute_prop_loss(s_vals_per_level, weights_per_level)
+            total_loss += loss_prop
+            summary_writer.add_scalar(
+                "train/prop", loss_prop.detach().item(), global_step=iteration
             )
 
         optimizer.zero_grad()

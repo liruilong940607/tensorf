@@ -6,6 +6,7 @@ import torch
 import torch.nn
 import torch.nn.functional as F
 
+from .prop_utils import rendering
 from .sh import eval_sh_bases
 
 
@@ -205,6 +206,12 @@ class TensorBase(torch.nn.Module):
         featureC=128,
         step_ratio=2.0,
         fea2denseAct="softplus",
+        gridSize_factor_per_prop=None,
+        density_factor_per_prop=None,
+        num_samples_per_prop=None,
+        num_samples=None,
+        opaque_bkgd=False,
+        sampling_type="uniform",
     ):
         super(TensorBase, self).__init__()
 
@@ -225,6 +232,25 @@ class TensorBase(torch.nn.Module):
 
         self.near_far = near_far
         self.step_ratio = step_ratio
+
+        self.use_prop = gridSize_factor_per_prop is not None
+        self.gridSize_factor_per_prop = gridSize_factor_per_prop
+        self.density_factor_per_prop = density_factor_per_prop
+        self.num_samples_per_prop = num_samples_per_prop
+        self.num_samples = num_samples
+        self.opaque_bkgd = opaque_bkgd
+        self.sampling_type = sampling_type
+        if self.use_prop:
+            assert self.occGrid is None
+            assert len(self.gridSize_factor_per_prop) == len(
+                self.density_factor_per_prop
+            ) and len(self.density_factor_per_prop) == len(
+                self.num_samples_per_prop
+            )
+            self.density_n_comp_per_prop = [
+                [int(n / f) for n in self.density_n_comp]
+                for f in self.density_factor_per_prop
+            ]
 
         self.update_stepSize(gridSize)
 
@@ -621,6 +647,7 @@ class TensorBase(torch.nn.Module):
             rgb_map,
             depth_map,
             num_valid_samples,
+            None,
         )  # rgb, sigma, alpha, weight, bg_weight
 
     def _forward_nerfacc(
@@ -693,7 +720,89 @@ class TensorBase(torch.nn.Module):
             render_bkgd=1 if white_bg else 0,
         )
 
-        return rgb_map, depth_map, t_starts.shape[0]
+        return rgb_map, depth_map, t_starts.shape[0], None
+
+    def _forward_prop(
+        self,
+        rays_chunk,
+        white_bg=True,
+        is_train=False,
+        ndc_ray=False,
+        N_samples=-1,
+        prop_requires_grad=False,
+    ):
+        assert not ndc_ray
+        origins = rays_chunk[:, :3]
+        viewdirs = rays_chunk[:, 3:6]
+
+        def prop_sigma_fn(t_starts, t_ends, prop_i):
+            t_origins = origins[..., None, :]
+            t_dirs = viewdirs[..., None, :]
+            positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+            positions_shape = positions.shape[:-1]
+            return (
+                self.feature2density(  # type: ignore
+                    self.compute_densityfeature(
+                        self.normalize_coord(positions).reshape(-1, 3),
+                        prop_i=prop_i,
+                    )
+                ).reshape(*positions_shape, 1)
+                * self.distance_scale
+            )
+
+        def rgb_sigma_fn(t_starts, t_ends):
+            t_origins = origins[..., None, :]
+            t_dirs = viewdirs[..., None, :].repeat_interleave(
+                t_starts.shape[-2], dim=-2
+            )
+            positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+            positions_shape = positions.shape[:-1]
+            positions = self.normalize_coord(positions)
+            positions = positions.reshape(-1, 3)
+            sigmas = (
+                self.feature2density(  # type: ignore
+                    self.compute_densityfeature(positions)
+                ).reshape(*positions_shape, 1)
+                * self.distance_scale
+            )
+            rgbs = self.renderModule(
+                positions,
+                t_dirs.reshape(-1, 3),
+                self.compute_appfeature(positions),
+            ).reshape(*positions_shape, 3)
+            return rgbs, sigmas
+
+        (
+            rgb_map,
+            _,
+            depth_map,
+            (weights_per_level, s_vals_per_level),
+        ) = rendering(
+            rgb_sigma_fn=rgb_sigma_fn,
+            num_samples=self.num_samples,
+            prop_sigma_fns=[
+                lambda *args: prop_sigma_fn(*args, i)
+                for i in range(len(self.num_samples_per_prop))
+            ],
+            num_samples_per_prop=self.num_samples_per_prop,
+            rays_o=origins,
+            rays_d=viewdirs,
+            scene_aabb=None,
+            near_plane=self.near_far[0],
+            far_plane=self.near_far[1],
+            stratified=is_train,
+            sampling_type=self.sampling_type,
+            opaque_bkgd=self.opaque_bkgd,
+            render_bkgd=1 if white_bg else 0,
+            proposal_requires_grad=prop_requires_grad,
+        )
+
+        return (
+            rgb_map,
+            depth_map,
+            self.num_samples * len(origins),
+            (weights_per_level, s_vals_per_level),
+        )
 
     def forward(
         self,
@@ -702,10 +811,20 @@ class TensorBase(torch.nn.Module):
         is_train=False,
         ndc_ray=False,
         N_samples=-1,
+        prop_requires_grad=False,
     ):
         if self.occGrid is not None:
             return self._forward_nerfacc(
                 rays_chunk, white_bg, is_train, ndc_ray, N_samples
+            )
+        elif self.use_prop:
+            return self._forward_prop(
+                rays_chunk,
+                white_bg,
+                is_train,
+                ndc_ray,
+                N_samples,
+                prop_requires_grad,
             )
         else:
             return self._forward(

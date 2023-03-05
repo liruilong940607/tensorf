@@ -281,6 +281,22 @@ class TensorVMSplit(TensorBase):
         self.basis_mat = torch.nn.Linear(
             sum(self.app_n_comp), self.app_dim, bias=False
         ).to(device)
+        if self.use_prop:
+            prop_density_svds = []
+            for density_n_comp, gridSize_factor in zip(
+                self.density_n_comp_per_prop, self.gridSize_factor_per_prop
+            ):
+                prop_density_svds.append(
+                    self.init_one_svd(
+                        density_n_comp,
+                        (self.gridSize / gridSize_factor).long(),
+                        0.1,
+                        device,
+                    )
+                )
+            self.prop_density_planes, self.prop_density_lines = [
+                torch.nn.ModuleList(l) for l in zip(*prop_density_svds)
+            ]
 
     def init_one_svd(self, n_component, gridSize, scale, device):
         plane_coef, line_coef = [], []
@@ -321,6 +337,17 @@ class TensorVMSplit(TensorBase):
             {"params": self.app_plane, "lr": lr_init_spatialxyz},
             {"params": self.basis_mat.parameters(), "lr": lr_init_network},
         ]
+        if self.use_prop:
+            grad_vars += [
+                {
+                    "params": self.prop_density_lines.parameters(),
+                    "lr": lr_init_spatialxyz,
+                },
+                {
+                    "params": self.prop_density_planes.parameters(),
+                    "lr": lr_init_spatialxyz,
+                },
+            ]
         if isinstance(self.renderModule, torch.nn.Module):
             grad_vars += [
                 {
@@ -377,7 +404,13 @@ class TensorVMSplit(TensorBase):
             )  # + reg(self.app_line[idx]) * 1e-3
         return total
 
-    def compute_densityfeature(self, xyz_sampled):
+    def compute_densityfeature(self, xyz_sampled, prop_i=None):
+        if prop_i is None:
+            density_plane = self.density_plane
+            density_line = self.density_line
+        else:
+            density_plane = self.prop_density_planes[prop_i]
+            density_line = self.prop_density_lines[prop_i]
 
         # plane + line basis
         coordinate_plane = (
@@ -411,12 +444,12 @@ class TensorVMSplit(TensorBase):
         )
         for idx_plane in range(len(self.density_plane)):
             plane_coef_point = F.grid_sample(
-                self.density_plane[idx_plane],
+                density_plane[idx_plane],
                 coordinate_plane[[idx_plane]],
                 align_corners=True,
             ).view(-1, *xyz_sampled.shape[:1])
             line_coef_point = F.grid_sample(
-                self.density_line[idx_plane],
+                density_line[idx_plane],
                 coordinate_line[[idx_plane]],
                 align_corners=True,
             ).view(-1, *xyz_sampled.shape[:1])
@@ -510,6 +543,23 @@ class TensorVMSplit(TensorBase):
         self.density_plane, self.density_line = self.up_sampling_VM(
             self.density_plane, self.density_line, res_target
         )
+        if self.use_prop:
+            prop_density_svds = []
+            for gridSize_factor, prop_density_plane, prop_density_line in zip(
+                self.gridSize_factor_per_prop,
+                self.prop_density_planes,
+                self.prop_density_lines,
+            ):
+                prop_density_svds.append(
+                    self.up_sampling_VM(
+                        prop_density_plane,
+                        prop_density_line,
+                        [int(s / gridSize_factor) for s in res_target],
+                    )
+                )
+            self.prop_density_plane, self.prop_density_line = [
+                torch.nn.ModuleList(l) for l in zip(*prop_density_svds)
+            ]
 
         self.update_stepSize(res_target)
         print(f"upsamping to {res_target}")
@@ -521,8 +571,6 @@ class TensorVMSplit(TensorBase):
         t_l, b_r = (xyz_min - self.aabb[0]) / self.units, (
             xyz_max - self.aabb[0]
         ) / self.units
-        # print(new_aabb, self.aabb)
-        # print(t_l, b_r,self.alphaMask.alpha_volume.shape)
         t_l, b_r = (
             torch.round(torch.round(t_l)).long(),
             torch.round(b_r).long() + 1,
@@ -548,6 +596,46 @@ class TensorVMSplit(TensorBase):
                     ..., t_l[mode1] : b_r[mode1], t_l[mode0] : b_r[mode0]
                 ]
             )
+
+        if self.use_prop:
+            prop_density_svds = []
+            for gridSize_factor, prop_density_plane, prop_density_line in zip(
+                self.gridSize_factor_per_prop,
+                self.prop_density_planes,
+                self.prop_density_lines,
+            ):
+                gridSize = (self.gridSize / gridSize_factor).long()
+                units = self.aabbSize / (gridSize - 1)
+                t_l, b_r = (xyz_min - self.aabb[0]) / units, (
+                    xyz_max - self.aabb[0]
+                ) / units
+                t_l, b_r = (
+                    torch.round(torch.round(t_l)).long(),
+                    torch.round(b_r).long() + 1,
+                )
+                b_r = torch.stack([b_r, gridSize]).amin(0)
+
+                for i in range(len(self.vecMode)):
+                    mode0 = self.vecMode[i]
+                    prop_density_line[i] = torch.nn.Parameter(
+                        prop_density_line[i].data[
+                            ..., t_l[mode0] : b_r[mode0], :
+                        ]
+                    )
+                    mode0, mode1 = self.matMode[i]
+                    prop_density_plane[i] = torch.nn.Parameter(
+                        prop_density_plane[i].data[
+                            ...,
+                            t_l[mode1] : b_r[mode1],
+                            t_l[mode0] : b_r[mode0],
+                        ]
+                    )
+                prop_density_svds.append(
+                    (prop_density_plane, prop_density_line)
+                )
+            self.prop_density_plane, self.prop_density_line = [
+                torch.nn.ModuleList(l) for l in zip(*prop_density_svds)
+            ]
 
         if not torch.all(self.alphaMask.gridSize == self.gridSize):
             t_l_r, b_r_r = t_l / (self.gridSize - 1), (b_r - 1) / (

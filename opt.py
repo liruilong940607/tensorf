@@ -198,6 +198,17 @@ def config_parser(cmd=None):
     parser.add_argument("--update_AlphaMask_list", type=int, action="append")
     parser.add_argument("--occ_grid_reso", type=int, default=-1)
 
+    parser.add_argument(
+        "--gridSize_factor_per_prop", type=float, nargs="+", default=None
+    )
+    parser.add_argument(
+        "--density_factor_per_prop", type=float, nargs="+", default=None
+    )
+    parser.add_argument(
+        "--num_samples_per_prop", type=int, nargs="+", default=None
+    )
+    parser.add_argument("--num_samples", type=int, default=None)
+
     parser.add_argument("--idx_view", type=int, default=0)
     # logging/saving options
     parser.add_argument("--N_vis", type=int, default=5, help="N images to vis")

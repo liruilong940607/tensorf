@@ -37,4 +37,3 @@ TV_weight_app = 0.01
 #N_voxel_final = 125000000 # 500**3
 #L1_weight_inital = 1e-5
 #L1_weight_rest = 1e-5
-
