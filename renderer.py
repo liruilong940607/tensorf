@@ -67,7 +67,7 @@ def OctreeRender_trilinear_fast(
         prop_extras.append(_prop_extras)
 
     if not tensorf.use_prop:
-        weights_per_level = s_vals_per_level = None
+        weights_per_level = s_vals_per_level = ray_masks_per_level = None
     else:
         collated = collate(
             prop_extras,
@@ -76,7 +76,7 @@ def OctreeRender_trilinear_fast(
                 torch.Tensor: lambda x, **_: torch.cat(x, 0),
             },
         )
-        weights_per_level, s_vals_per_level = collated
+        weights_per_level, s_vals_per_level, ray_masks_per_level = collated
 
     return (
         torch.cat(rgbs),
@@ -87,6 +87,7 @@ def OctreeRender_trilinear_fast(
         sum(num_samples),
         weights_per_level,
         s_vals_per_level,
+        ray_masks_per_level,
     )
 
 
@@ -128,7 +129,7 @@ def evaluation(
         W, H = test_dataset.img_wh
         rays = samples.view(-1, samples.shape[-1])
 
-        rgb_map, _, depth_map, _, _, _, _, _ = renderer(
+        rgb_map, _, depth_map, _, _, _, _, _, _ = renderer(
             rays,
             tensorf,
             chunk=4096,
@@ -237,7 +238,7 @@ def evaluation_path(
             )
         rays = torch.cat([rays_o, rays_d], 1)  # (h*w, 6)
 
-        rgb_map, _, depth_map, _, _, _, _, _ = renderer(
+        rgb_map, _, depth_map, _, _, _, _, _, _ = renderer(
             rays,
             tensorf,
             chunk=8192,

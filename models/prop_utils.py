@@ -230,6 +230,7 @@ def rendering(
     render_bkgd: Optional[torch.Tensor] = None,
     # gradient options
     proposal_requires_grad: bool = False,
+    ray_opacity_thres: Optional[float] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     if len(prop_sigma_fns) != len(num_samples_per_prop):
         raise ValueError(
@@ -258,8 +259,9 @@ def rendering(
     )
     weights = torch.ones_like(rays_o[..., :1])
     rgbs = t_vals = None
+    ray_masks = t_min < t_max
 
-    weights_per_level, s_vals_per_level = [], []
+    weights_per_level, s_vals_per_level, ray_masks_per_level = [], [], []
     for level, (level_fn, level_samples) in enumerate(
         zip(
             prop_sigma_fns + [rgb_sigma_fn],
@@ -285,12 +287,12 @@ def rendering(
             with torch.set_grad_enabled(proposal_requires_grad):
                 # (N, S, 1).
                 sigmas = level_fn(
-                    t_vals[..., :-1, None], t_vals[..., 1:, None]
+                    t_vals[..., :-1, None], t_vals[..., 1:, None], ray_masks
                 )
         else:
             # (N, S, *).
             rgbs, sigmas = level_fn(
-                t_vals[..., :-1, None], t_vals[..., 1:, None]
+                t_vals[..., :-1, None], t_vals[..., 1:, None], ray_masks
             )
 
         # (N, S).
@@ -303,13 +305,22 @@ def rendering(
 
         weights_per_level.append(weights)
         s_vals_per_level.append(s_vals)
+        ray_masks_per_level.append(ray_masks)
+
+        if ray_opacity_thres is not None:
+            ray_masks = weights.sum(dim=-1) > ray_opacity_thres
 
     assert rgbs is not None and t_vals is not None
     rgbs, opacities, depths = render_from_weighted(
         rgbs, t_vals[..., None], weights[..., None], render_bkgd
     )
 
-    return rgbs, opacities, depths, (weights_per_level, s_vals_per_level)
+    return (
+        rgbs,
+        opacities,
+        depths,
+        (weights_per_level, s_vals_per_level, ray_masks_per_level),
+    )
 
 
 #  def render_image(

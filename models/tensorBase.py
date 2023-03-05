@@ -735,22 +735,52 @@ class TensorBase(torch.nn.Module):
         origins = rays_chunk[:, :3]
         viewdirs = rays_chunk[:, 3:6]
 
-        def prop_sigma_fn(t_starts, t_ends, prop_i):
+        def prop_sigma_fn(t_starts, t_ends, ray_masks, prop_i):
             t_origins = origins[..., None, :]
             t_dirs = viewdirs[..., None, :]
             positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
             positions_shape = positions.shape[:-1]
-            return (
-                self.feature2density(  # type: ignore
-                    self.compute_densityfeature(
-                        self.normalize_coord(positions).reshape(-1, 3),
-                        prop_i=prop_i,
+            if ray_masks is None:
+                sigmas = (
+                    self.feature2density(  # type: ignore
+                        self.compute_densityfeature(
+                            self.normalize_coord(positions).reshape(-1, 3),
+                            prop_i=prop_i,
+                        )
+                    ).reshape(*positions_shape, 1)
+                    * self.distance_scale
+                )
+            else:
+                positions = positions[ray_masks]
+                if positions.shape[0] == 0:
+                    sigmas = t_starts.new_zeros(positions_shape + (1,))
+                elif ray_masks.all():
+                    sigmas = self.feature2density(  # type: ignore
+                        self.compute_densityfeature(
+                            self.normalize_coord(
+                                positions.reshape(-1, 3),
+                            ),
+                            prop_i=prop_i,
+                        ).reshape(*positions_shape, 1)
+                        * self.distance_scale,
                     )
-                ).reshape(*positions_shape, 1)
-                * self.distance_scale
-            )
+                else:
+                    sigmas = t_starts.new_zeros(positions_shape + (1,))
+                    sigmas = sigmas.masked_scatter_(
+                        ray_masks[:, None, None],
+                        self.feature2density(  # type: ignore
+                            self.compute_densityfeature(
+                                self.normalize_coord(
+                                    positions.reshape(-1, 3),
+                                ),
+                                prop_i=prop_i,
+                            ).reshape(*positions.shape[:-1], 1)
+                            * self.distance_scale,
+                        ),
+                    )
+            return sigmas
 
-        def rgb_sigma_fn(t_starts, t_ends):
+        def rgb_sigma_fn(t_starts, t_ends, ray_masks):
             t_origins = origins[..., None, :]
             t_dirs = viewdirs[..., None, :].repeat_interleave(
                 t_starts.shape[-2], dim=-2
@@ -758,25 +788,63 @@ class TensorBase(torch.nn.Module):
             positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
             positions_shape = positions.shape[:-1]
             positions = self.normalize_coord(positions)
-            positions = positions.reshape(-1, 3)
-            sigmas = (
-                self.feature2density(  # type: ignore
-                    self.compute_densityfeature(positions)
-                ).reshape(*positions_shape, 1)
-                * self.distance_scale
-            )
-            rgbs = self.renderModule(
-                positions,
-                t_dirs.reshape(-1, 3),
-                self.compute_appfeature(positions),
-            ).reshape(*positions_shape, 3)
+            if ray_masks is None:
+                positions = positions.reshape(-1, 3)
+                sigmas = (
+                    self.feature2density(  # type: ignore
+                        self.compute_densityfeature(positions)
+                    ).reshape(*positions_shape, 1)
+                    * self.distance_scale
+                )
+                rgbs = self.renderModule(
+                    positions,
+                    t_dirs.reshape(-1, 3),
+                    self.compute_appfeature(positions),
+                ).reshape(*positions_shape, 3)
+            else:
+                positions = positions[ray_masks]
+                if positions.shape[0] == 0:
+                    sigmas = t_starts.new_zeros(positions_shape + (1,))
+                    rgbs = t_starts.new_zeros(positions_shape + (3,))
+                elif ray_masks.all():
+                    positions = positions.reshape(-1, 3)
+                    sigmas = (
+                        self.feature2density(  # type: ignore
+                            self.compute_densityfeature(positions)
+                        ).reshape(*positions_shape, 1)
+                        * self.distance_scale
+                    )
+                    rgbs = self.renderModule(
+                        positions,
+                        t_dirs[ray_masks].reshape(-1, 3),
+                        self.compute_appfeature(positions),
+                    ).reshape(*positions_shape, 3)
+                else:
+                    positions = positions.reshape(-1, 3)
+                    sigmas = t_starts.new_zeros(positions_shape + (1,))
+                    rgbs = t_starts.new_zeros(positions_shape + (3,))
+                    sigmas = sigmas.masked_scatter_(
+                        ray_masks[:, None, None],
+                        self.feature2density(  # type: ignore
+                            self.compute_densityfeature(positions)
+                        ).reshape(*positions.shape[:-1], 1)
+                        * self.distance_scale,
+                    )
+                    rgbs = rgbs.masked_scatter_(
+                        ray_masks[:, None, None],
+                        self.renderModule(
+                            positions,
+                            t_dirs[ray_masks].reshape(-1, 3),
+                            self.compute_appfeature(positions),
+                        ).reshape(*positions.shape[:-1], 3),
+                    )
             return rgbs, sigmas
 
         (
             rgb_map,
             _,
             depth_map,
-            (weights_per_level, s_vals_per_level),
+            (weights_per_level, s_vals_per_level, ray_masks_per_level),
         ) = rendering(
             rgb_sigma_fn=rgb_sigma_fn,
             num_samples=self.num_samples,
@@ -787,7 +855,7 @@ class TensorBase(torch.nn.Module):
             num_samples_per_prop=self.num_samples_per_prop,
             rays_o=origins,
             rays_d=viewdirs,
-            scene_aabb=None,
+            scene_aabb=self.aabb.reshape(-1),
             near_plane=self.near_far[0],
             far_plane=self.near_far[1],
             stratified=is_train,
@@ -800,8 +868,8 @@ class TensorBase(torch.nn.Module):
         return (
             rgb_map,
             depth_map,
-            self.num_samples * len(origins),
-            (weights_per_level, s_vals_per_level),
+            self.num_samples * ray_masks_per_level[-1].sum(),
+            (weights_per_level, s_vals_per_level, ray_masks_per_level),
         )
 
     def forward(

@@ -314,6 +314,7 @@ def reconstruction(args):
             num_samples,
             weights_per_level,
             s_vals_per_level,
+            ray_masks_per_level,
         ) = renderer(
             rays_train,
             tensorf,
@@ -373,9 +374,10 @@ def reconstruction(args):
                 "train/prop", loss_prop.detach().item(), global_step=iteration
             )
 
-        optimizer.zero_grad()
-        total_loss.backward()
-        optimizer.step()
+        if num_samples > 0:
+            optimizer.zero_grad()
+            total_loss.backward()
+            optimizer.step()
 
         loss = loss.detach().item()
 
