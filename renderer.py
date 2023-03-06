@@ -167,10 +167,10 @@ def evaluation(
         # rgb_map = np.concatenate((rgb_map, depth_map), axis=1)
         rgb_maps.append(rgb_map)
         #  depth_maps.append(depth_map)
-        #  if savePath is not None:
-        #      imageio.imwrite(f"{savePath}/{prtx}{idx:03d}.png", rgb_map)
-        #      rgb_map = np.concatenate((rgb_map, depth_map), axis=1)
-        #      imageio.imwrite(f"{savePath}/rgbd/{prtx}{idx:03d}.png", rgb_map)
+        if savePath is not None:
+            imageio.imwrite(f"{savePath}/{prtx}{idx:03d}.png", rgb_map)
+            #  rgb_map = np.concatenate((rgb_map, depth_map), axis=1)
+            #  imageio.imwrite(f"{savePath}/rgbd/{prtx}{idx:03d}.png", rgb_map)
 
     #  imageio.mimwrite(
     #      f"{savePath}/{prtx}video.mp4", np.stack(rgb_maps), fps=30, quality=10

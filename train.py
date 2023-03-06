@@ -76,7 +76,20 @@ def render_test(args):
     ckpt = torch.load(args.ckpt, map_location=device)
     kwargs = ckpt["kwargs"]
     kwargs.update({"device": device})
-    tensorf = eval(args.model_name)(**kwargs)
+    occ_grid = None
+    if args.occ_grid_reso > 0:
+        occ_grid = nerfacc.OccupancyGrid(
+            roi_aabb=ckpt["state_dict"]["occGrid._roi_aabb"],
+            resolution=args.occ_grid_reso,
+        ).to(device)
+    tensorf = eval(args.model_name)(
+        **kwargs,
+        occGrid=occ_grid,
+        gridSize_factor_per_prop=args.gridSize_factor_per_prop,
+        density_factor_per_prop=args.density_factor_per_prop,
+        num_samples_per_prop=args.num_samples_per_prop,
+        num_samples=args.num_samples,
+    )
     tensorf.load(ckpt)
 
     logfolder = os.path.dirname(args.ckpt)
@@ -106,7 +119,7 @@ def render_test(args):
 
     if args.render_test:
         os.makedirs(f"{logfolder}/{args.expname}/imgs_test_all", exist_ok=True)
-        evaluation(
+        PSNRs_test = evaluation(
             test_dataset,
             tensorf,
             args,
@@ -117,6 +130,9 @@ def render_test(args):
             white_bg=white_bg,
             ndc_ray=ndc_ray,
             device=device,
+        )
+        print(
+            f"======> {args.expname} train all psnr: {np.mean(PSNRs_test)} <========================"
         )
 
     if args.render_path:
@@ -180,19 +196,25 @@ def reconstruction(args):
     reso_cur = N_to_reso(args.N_voxel_init, aabb)
     nSamples = min(args.nSamples, cal_n_samples(reso_cur, args.step_ratio))
 
+    occ_grid = None
+    if args.occ_grid_reso > 0:
+        occ_grid = nerfacc.OccupancyGrid(
+            roi_aabb=aabb.reshape(-1), resolution=args.occ_grid_reso
+        ).to(device)
     if args.ckpt is not None:
         ckpt = torch.load(args.ckpt, map_location=device)
         kwargs = ckpt["kwargs"]
         kwargs.update({"device": device})
-        tensorf = eval(args.model_name)(**kwargs)
+        tensorf = eval(args.model_name)(
+            **kwargs,
+            occGrid=occ_grid,
+            gridSize_factor_per_prop=args.gridSize_factor_per_prop,
+            density_factor_per_prop=args.density_factor_per_prop,
+            num_samples_per_prop=args.num_samples_per_prop,
+            num_samples=args.num_samples,
+        )
         tensorf.load(ckpt)
     else:
-        occ_grid = None
-        if args.occ_grid_reso > 0:
-            occ_grid = nerfacc.OccupancyGrid(
-                roi_aabb=aabb.reshape(-1), resolution=args.occ_grid_reso
-            ).to(device)
-
         tensorf = eval(args.model_name)(
             aabb,
             reso_cur,

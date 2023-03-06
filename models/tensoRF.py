@@ -557,7 +557,7 @@ class TensorVMSplit(TensorBase):
                         [int(s / gridSize_factor) for s in res_target],
                     )
                 )
-            self.prop_density_plane, self.prop_density_line = [
+            self.prop_density_planes, self.prop_density_lines = [
                 torch.nn.ModuleList(l) for l in zip(*prop_density_svds)
             ]
 
@@ -633,7 +633,7 @@ class TensorVMSplit(TensorBase):
                 prop_density_svds.append(
                     (prop_density_plane, prop_density_line)
                 )
-            self.prop_density_plane, self.prop_density_line = [
+            self.prop_density_planes, self.prop_density_lines = [
                 torch.nn.ModuleList(l) for l in zip(*prop_density_svds)
             ]
 
