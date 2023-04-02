@@ -13,7 +13,7 @@ import datetime
 
 from dataLoader import dataset_dict
 import sys
-
+import nerfacc
 
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -64,7 +64,14 @@ def render_test(args):
     ckpt = torch.load(args.ckpt, map_location=device)
     kwargs = ckpt['kwargs']
     kwargs.update({'device': device})
-    tensorf = eval(args.model_name)(**kwargs)
+    occ_grid = None
+    if args.occ_grid_reso > 0:
+        occ_grid = nerfacc.OccupancyGrid(
+            roi_aabb=ckpt["state_dict"]["occGrid._roi_aabb"],
+            resolution=args.occ_grid_reso,
+        ).to(device)
+    tensorf = eval(args.model_name)(**kwargs, occGrid=occ_grid)
+
     tensorf.load(ckpt)
 
     logfolder = os.path.dirname(args.ckpt)
@@ -77,8 +84,11 @@ def render_test(args):
 
     if args.render_test:
         os.makedirs(f'{logfolder}/{args.expname}/imgs_test_all', exist_ok=True)
-        evaluation(test_dataset,tensorf, args, renderer, f'{logfolder}/{args.expname}/imgs_test_all/',
+        PSNRs_test = evaluation(test_dataset,tensorf, args, renderer, f'{logfolder}/{args.expname}/imgs_test_all/',
                                 N_vis=-1, N_samples=-1, white_bg = white_bg, ndc_ray=ndc_ray,device=device)
+        print(
+            f"======> {args.expname} test all psnr: {np.mean(PSNRs_test)} <========================"
+        )
 
     if args.render_path:
         c2ws = test_dataset.render_path
@@ -124,19 +134,27 @@ def reconstruction(args):
     reso_cur = N_to_reso(args.N_voxel_init, aabb)
     nSamples = min(args.nSamples, cal_n_samples(reso_cur,args.step_ratio))
 
+    occ_grid = None
+    if args.occ_grid_reso > 0:
+        occ_grid = nerfacc.OccupancyGrid(
+            roi_aabb=aabb.reshape(-1), resolution=args.occ_grid_reso
+        ).to(device)
 
     if args.ckpt is not None:
         ckpt = torch.load(args.ckpt, map_location=device)
         kwargs = ckpt['kwargs']
         kwargs.update({'device':device})
-        tensorf = eval(args.model_name)(**kwargs)
+        tensorf = eval(args.model_name)(**kwargs, occGrid=occ_grid)
         tensorf.load(ckpt)
     else:
         tensorf = eval(args.model_name)(aabb, reso_cur, device,
                     density_n_comp=n_lamb_sigma, appearance_n_comp=n_lamb_sh, app_dim=args.data_dim_color, near_far=near_far,
-                    shadingMode=args.shadingMode, alphaMask_thres=args.alpha_mask_thre, density_shift=args.density_shift, distance_scale=args.distance_scale,
+                    shadingMode=args.shadingMode, occGrid=occ_grid, alphaMask_thres=args.alpha_mask_thre, density_shift=args.density_shift, distance_scale=args.distance_scale,
                     pos_pe=args.pos_pe, view_pe=args.view_pe, fea_pe=args.fea_pe, featureC=args.featureC, step_ratio=args.step_ratio, fea2denseAct=args.fea2denseAct)
 
+    # Don't update aabb and invaabbSize for occ.
+    def occ_normalize_coord(xyz_sampled):
+        return (xyz_sampled - tensorf.aabb[0]) * tensorf.invaabbSize - 1
 
     grad_vars = tensorf.get_optparam_groups(args.lr_init, args.lr_basis)
     if args.lr_decay_iters > 0:
@@ -173,14 +191,36 @@ def reconstruction(args):
 
 
     pbar = tqdm(range(args.n_iters), miniters=args.progress_refresh_rate, file=sys.stdout)
+    run_tic = time.time()
     for iteration in pbar:
 
 
         ray_idx = trainingSampler.nextids()
         rays_train, rgb_train = allrays[ray_idx], allrgbs[ray_idx].to(device)
 
+        if tensorf.occGrid is not None:
+
+            def occ_eval_fn(x):
+                step_size = tensorf.stepSize
+
+                # compute occupancy
+                density = (
+                    tensorf.feature2density(
+                        tensorf.compute_densityfeature(occ_normalize_coord(x))[
+                            :, None
+                        ]
+                    )
+                    * tensorf.distance_scale
+                )
+                return density * step_size
+
+            tensorf.occGrid.every_n_step(
+                step=iteration, occ_eval_fn=occ_eval_fn
+            )
+
+
         #rgb_map, alphas_map, depth_map, weights, uncertainty
-        rgb_map, alphas_map, depth_map, weights, uncertainty = renderer(rays_train, tensorf, chunk=args.batch_size,
+        rgb_map, alphas_map, depth_map, weights, uncertainty, num_samples = renderer(rays_train, tensorf, chunk=args.batch_size,
                                 N_samples=nSamples, white_bg = white_bg, ndc_ray=ndc_ray, device=device, is_train=True)
 
         loss = torch.mean((rgb_map - rgb_train) ** 2)
@@ -224,11 +264,13 @@ def reconstruction(args):
 
         # Print the current values of the losses.
         if iteration % args.progress_refresh_rate == 0:
+            step_toc = time.time()
             pbar.set_description(
                 f'Iteration {iteration:05d}:'
                 + f' train_psnr = {float(np.mean(PSNRs)):.2f}'
                 + f' test_psnr = {float(np.mean(PSNRs_test)):.2f}'
                 + f' mse = {loss:.6f}'
+                + f" elapsed_time = {step_toc - run_tic:.2f}"
             )
             PSNRs = []
 
@@ -274,6 +316,8 @@ def reconstruction(args):
         
 
     tensorf.save(f'{logfolder}/{args.expname}.th')
+    elapsed_time = time.time() - run_tic
+    print(f"Total time {elapsed_time:.2f}s.")
 
 
     if args.render_train:
