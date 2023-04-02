@@ -1,20 +1,19 @@
 
-import os
-from tqdm.auto import tqdm
-from opt import config_parser
-
-
-
-import json, random
-from renderer import *
-from utils import *
-from torch.utils.tensorboard import SummaryWriter
 import datetime
+import json
+import os
+import random
+import sys
+import time
+
+import nerfacc
+from torch.utils.tensorboard import SummaryWriter
+from tqdm.auto import tqdm
 
 from dataLoader import dataset_dict
-import sys
-import nerfacc
-
+from opt import config_parser
+from renderer import *
+from utils import *
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -66,7 +65,7 @@ def render_test(args):
     kwargs.update({'device': device})
     occ_grid = None
     if args.occ_grid_reso > 0:
-        occ_grid = nerfacc.OccupancyGrid(
+        occ_grid = nerfacc.OccGridEstimator(
             roi_aabb=ckpt["state_dict"]["occGrid._roi_aabb"],
             resolution=args.occ_grid_reso,
         ).to(device)
@@ -136,7 +135,7 @@ def reconstruction(args):
 
     occ_grid = None
     if args.occ_grid_reso > 0:
-        occ_grid = nerfacc.OccupancyGrid(
+        occ_grid = nerfacc.OccGridEstimator(
             roi_aabb=aabb.reshape(-1), resolution=args.occ_grid_reso
         ).to(device)
 
@@ -214,7 +213,7 @@ def reconstruction(args):
                 )
                 return density * step_size
 
-            tensorf.occGrid.every_n_step(
+            tensorf.occGrid.update_every_n_steps(
                 step=iteration, occ_eval_fn=occ_eval_fn
             )
 

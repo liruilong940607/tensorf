@@ -1,10 +1,12 @@
+import time
+
+import nerfacc
+import numpy as np
 import torch
 import torch.nn
 import torch.nn.functional as F
+
 from .sh import eval_sh_bases
-import numpy as np
-import time
-import nerfacc
 
 
 def positional_encoding(positions, freqs):
@@ -486,15 +488,15 @@ class TensorBase(torch.nn.Module):
         def sigma_fn(t_starts, t_ends, ray_indices):
             t_origins = origins[ray_indices]
             t_dirs = viewdirs[ray_indices]
-            positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+            positions = t_origins + t_dirs * (t_starts + t_ends)[..., None] / 2.0
             if t_origins.shape[0] == 0:
-                return torch.zeros((0, 1), device=t_origins.device)
+                return torch.zeros((0,), device=t_origins.device)
             return (
                 self.feature2density(  # type: ignore
                     self.compute_densityfeature(
                         self.normalize_coord(positions)
                     )
-                )[:, None]
+                )
                 * self.distance_scale
             )
 
@@ -504,13 +506,13 @@ class TensorBase(torch.nn.Module):
             if t_origins.shape[0] == 0:
                 return torch.zeros(
                     (0, 3), device=t_origins.device
-                ), torch.zeros((0, 1), device=t_origins.device)
-            positions = t_origins + t_dirs * (t_starts + t_ends) / 2.0
+                ), torch.zeros((0,), device=t_origins.device)
+            positions = t_origins + t_dirs * (t_starts + t_ends)[..., None] / 2.0
             positions = self.normalize_coord(positions)
             sigmas = (
                 self.feature2density(  # type: ignore
                     self.compute_densityfeature(positions)
-                )[:, None]
+                )
                 * self.distance_scale
             )
             rgbs = self.renderModule(
@@ -518,21 +520,19 @@ class TensorBase(torch.nn.Module):
             )
             return rgbs, sigmas
 
-        ray_indices, t_starts, t_ends = nerfacc.ray_marching(
+        ray_indices, t_starts, t_ends = self.occGrid.sampling(
             origins,
             viewdirs,
-            scene_aabb=self.aabb.reshape(-1),
-            grid=self.occGrid,
             sigma_fn=sigma_fn,
             near_plane=self.near_far[0],
             far_plane=self.near_far[1],
             render_step_size=self.stepSize,
             stratified=is_train,
         )
-        rgb_map, _, depth_map = nerfacc.rendering(
+        rgb_map, _, depth_map, _ = nerfacc.rendering(
             t_starts,
             t_ends,
-            ray_indices,
+            ray_indices=ray_indices,
             n_rays=origins.shape[0],
             rgb_sigma_fn=rgb_sigma_fn,
             render_bkgd=1 if white_bg else 0,
