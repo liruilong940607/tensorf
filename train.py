@@ -317,7 +317,7 @@ def reconstruction(args):
     tensorf.save(f'{logfolder}/{args.expname}.th')
     elapsed_time = time.time() - run_tic
     print(f"Total time {elapsed_time:.2f}s.")
-
+    np.savetxt(f'{logfolder}/training_time.txt', np.asarray([elapsed_time]))
 
     if args.render_train:
         os.makedirs(f'{logfolder}/imgs_train_all', exist_ok=True)
