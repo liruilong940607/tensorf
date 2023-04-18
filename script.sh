@@ -30,7 +30,8 @@ case $MODE in
     echo "TT dataset: vanilla"
     for scene in $SCENES_TT; do
       echo $scene
-      OMP_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=$DEVICE python train.py --config configs/truck.txt --datadir ./data/TanksAndTemple/$scene --expname $scene
+      OMP_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=$DEVICE python train.py --config configs/truck.txt --datadir ./data/TanksAndTemple/$scene --expname $scene \
+        --render_only 1 --render_path 1 --render_test 0 --ckpt ./log/${scene}/${scene}.th
     done
     ;;
 
@@ -38,7 +39,8 @@ case $MODE in
     echo "TT dataset: nerfacc (occgrid)"
     for scene in $SCENES_TT; do
       echo $scene
-      OMP_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=$DEVICE python train.py --config configs/truck.txt --datadir ./data/TanksAndTemple/$scene  --expname $scene --occ_grid_reso 128 --basedir ./log_nerfacc
+      OMP_NUM_THREADS=1 CUDA_VISIBLE_DEVICES=$DEVICE python train.py --config configs/truck.txt --datadir ./data/TanksAndTemple/$scene  --expname $scene --occ_grid_reso 128 --basedir ./log_nerfacc \
+        --render_only 1 --render_path 1 --render_test 0 --ckpt ./log_nerfacc/${scene}/${scene}.th
     done
     ;;
 esac
